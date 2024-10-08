@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文档差异对比工具</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/diff_match_patch/20121119/diff_match_patch.js"></script>
+    <script src="https://unpkg.com/mammoth@1.4.0/mammoth.browser.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.16.9/xlsx.full.min.js"></script>
+    <style>
+        .diff-line {
+            display: flex;
+            align-items: stretch;
+        }
+        .line-number {
+            width: 30px;
+            text-align: right;
+            padding-right: 5px;
+            color: #888;
+            user-select: none;
+        }
+        .diff-content {
+            flex-grow: 1;
+            word-wrap: break-word;
+        }
+        .diff-flow {
+            width: 40px;
+            position: relative;
+        }
+        .diff-flow::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 50%;
+            border-left: 1px dashed #ccc;
+        }
+        .flow-line {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+        }
+        .flow-left {
+            left: 0;
+            background-color: #fca5a5;
+        }
+        .flow-right {
+            right: 0;
+            background-color: #86efac;
+        }
+        .flow-line::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            width: 20px;
+            height: 2px;
+            background-color: inherit;
+        }
+        .flow-left::after {
+            right: -20px;
+        }
+        .flow-right::after {
+            left: -20px;
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="app" class="container mx-auto p-4">
+        <h1 class="text-3xl font-bold mb-6 text-center text-gray-800">文档差异对比工具</h1>
+        <div class="flex space-x-4 mb-6">
+            <div class="w-1/2 bg-white rounded-lg shadow-md p-4">
+                <h2 class="text-xl font-semibold mb-2 text-gray-700">左侧文档</h2>
+                <input type="file" @change="handleFileUpload('left', $event)" accept=".docx,.xlsx,.txt" class="mb-2">
+                <textarea v-model="leftText" @drop="handleDrop('left', $event)" @dragover.prevent 
+                          class="w-full h-64 p-2 border rounded resize-none focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                          placeholder="将文件拖放到此处或粘贴文本"></textarea>
+            </div>
+            <div class="w-1/2 bg-white rounded-lg shadow-md p-4">
+                <h2 class="text-xl font-semibold mb-2 text-gray-700">右侧文档</h2>
+                <input type="file" @change="handleFileUpload('right', $event)" accept=".docx,.xlsx,.txt" class="mb-2">
+                <textarea v-model="rightText" @drop="handleDrop('right', $event)" @dragover.prevent 
+                          class="w-full h-64 p-2 border rounded resize-none focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                          placeholder="将文件拖放到此处或粘贴文本"></textarea>
+            </div>
+        </div>
+        <div class="text-center space-x-4">
+            <button @click="compareDocs" class="px-6 py-3 bg-blue-500 text-white rounded-lg shadow-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition duration-300">
+                对比文档
+            </button>
+            <button @click="clearAll" class="px-6 py-3 bg-red-500 text-white rounded-lg shadow-md hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-300">
+                清空
+            </button>
+        </div>
+        <div v-if="diff.left || diff.right" class="mt-8 flex space-x-4 bg-white rounded-lg shadow-lg p-6">
+            <div class="w-[calc(50%-20px)]">
+                <h2 class="text-xl font-semibold mb-4 text-gray-700">左侧文档：</h2>
+                <div class="border rounded p-4 max-h-[600px] overflow-auto">
+                    <div v-for="(line, index) in diff.left" :key="'left-'+index" class="diff-line">
+                        <span class="line-number">{{ index + 1 }}</span>
+                        <div class="diff-content" v-html="line"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="w-[40px] relative">
+                <div class="diff-flow">
+                    <div v-for="flow in diff.flow" :key="flow.id" 
+                         class="flow-line" 
+                         :class="{'flow-left': flow.direction === 'left', 'flow-right': flow.direction === 'right'}"
+                         :style="{top: flow.position + 'px'}">
+                    </div>
+                </div>
+            </div>
+            <div class="w-[calc(50%-20px)]">
+                <h2 class="text-xl font-semibold mb-4 text-gray-700">右侧文档：</h2>
+                <div class="border rounded p-4 max-h-[600px] overflow-auto">
+                    <div v-for="(line, index) in diff.right" :key="'right-'+index" class="diff-line">
+                        <span class="line-number">{{ index + 1 }}</span>
+                        <div class="diff-content" v-html="line"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted } = Vue
+
+        createApp({
+            setup() {
+                const leftText = ref('')
+                const rightText = ref('')
+                const diff = ref({ left: [], right: [], flow: [] })
+
+                onMounted(() => {
+                    leftText.value = `这是一个对比工具，用来比较两段文字的差异，快速找到修改的地方。
+假如，我做了1个文档，别人修改了我的文档，别人到底修改了哪些地方？
+此程序能快速找到全部修改的地方。
+
+你可以在这里输入内容，也可以粘贴 word/excel/txt 等内容。
+左边、右边输入内容后，程序会自动比较差异、自动找出修改的位置~
+
+程序做完差异比较后，会用不同的颜色标记出来：
+删除的文字，会有删除线；
+新添加的文字，会有绿色标记；
+修改过的地方，会有背景色标记。
+
+快试试吧！`
+
+                    rightText.value = `这是一个对比工具，用来比较两段文字的差异，快速找到修改的地方。
+假如，我做了1个文档，别人修改了我的文档，别人到底修改了哪些地方？
+此程序能快速找到全部修改的地方。
+
+你可以在这里输入内容，也可以粘贴 word/excel/txt 等内容，还能用鼠标把文档拖到此网页，也能快速比较文档的差异。
+左边、右边输入内容后，程序会自动比较差异、自动找出修改的位置~
+
+程序做完差异比较后，会用不同的颜色标记出来：
+新添加的文字，会有绿色标记（比如：这就是新添加的内容）；
+修改过的地方，会有背景色标记。
+
+快试试吧！
+有了这个程序，文档修改的地方就能快速找到了~`
+                })
+
+                const handleFileUpload = async (side, event) => {
+                    const file = event.target.files[0]
+                    if (file) {
+                        const content = await readFile(file)
+                        if (side === 'left') {
+                            leftText.value = content
+                        } else {
+                            rightText.value = content
+                        }
+                    }
+                }
+
+                const handleDrop = async (side, event) => {
+                    event.preventDefault()
+                    const file = event.dataTransfer.files[0]
+                    if (file) {
+                        const content = await readFile(file)
+                        if (side === 'left') {
+                            leftText.value = content
+                        } else {
+                            rightText.value = content
+                        }
+                    }
+                }
+
+                const readFile = async (file) => {
+                    if (file.name.endsWith('.docx')) {
+                        return await readWordFile(file)
+                    } else if (file.name.endsWith('.xlsx')) {
+                        return await readExcelFile(file)
+                    } else {
+                        return await readTextFile(file)
+                    }
+                }
+
+                const readWordFile = (file) => {
+                    return new Promise((resolve) => {
+                        const reader = new FileReader()
+                        reader.onload = (e) => {
+                            const arrayBuffer = e.target.result
+                            mammoth.extractRawText({ arrayBuffer: arrayBuffer })
+                                .then((result) => resolve(result.value))
+                        }
+                        reader.readAsArrayBuffer(file)
+                    })
+                }
+
+                const readExcelFile = (file) => {
+                    return new Promise((resolve) => {
+                        const reader = new FileReader()
+                        reader.onload = (e) => {
+                            const data = new Uint8Array(e.target.result)
+                            const workbook = XLSX.read(data, { type: 'array' })
+                            const worksheet = workbook.Sheets[workbook.SheetNames[0]]
+                            const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 })
+                            resolve(jsonData.map(row => row.join('\t')).join('\n'))
+                        }
+                        reader.readAsArrayBuffer(file)
+                    })
+                }
+
+                const readTextFile = (file) => {
+                    return new Promise((resolve) => {
+                        const reader = new FileReader()
+                        reader.onload = (e) => resolve(e.target.result)
+                        reader.readAsText(file)
+                    })
+                }
+
+                const compareDocs = () => {
+                    const dmp = new diff_match_patch()
+                    const diffs = dmp.diff_main(leftText.value, rightText.value)
+                    dmp.diff_cleanupSemantic(diffs)
+                    
+                    let leftLines = ['']
+                    let rightLines = ['']
+                    let flowLines = []
+                    let leftLineIndex = 0
+                    let rightLineIndex = 0
+
+                    for (let i = 0; i < diffs.length; i++) {
+                        const [type, text] = diffs[i]
+                        const lines = text.split('\n')
+                        
+                        switch (type) {
+                            case 1: // Insertion
+                                lines.forEach((line, index) => {
+                                    if (index > 0) rightLines.push('')
+                                    rightLines[rightLineIndex] += `<span class="bg-green-200">${line}</span>`
+                                    if (index < lines.length - 1) rightLineIndex++
+                                })
+                                flowLines.push({
+                                    id: flowLines.length,
+                                    direction: 'right',
+                                    position: (rightLineIndex * 24) + 12 // Assuming each line is 24px high
+                                })
+                                break
+                            case -1: // Deletion
+                                lines.forEach((line, index) => {
+                                    if (index > 0) leftLines.push('')
+                                    leftLines[leftLineIndex] += `<span class="line-through text-red-500">${line}</span>`
+                                    if (index < lines.length - 1) leftLineIndex++
+                                })
+                                flowLines.push({
+                                    id: flowLines.length,
+                                    direction: 'left',
+                                    position: (leftLineIndex * 24) + 12
+                                })
+                                break
+                            case 0: // No change
+                                lines.forEach((line, index) => {
+                                    if (index > 0) {
+                                        leftLines.push('')
+                                        rightLines.push('')
+                                        leftLineIndex++
+                                        rightLineIndex++
+                                    }
+                                    leftLines[leftLineIndex] += line
+                                    rightLines[rightLineIndex] += line
+                                })
+                                break
+                        }
+                    }
+
+                    diff.value = { left: leftLines, right: rightLines, flow: flowLines }
+                }
+
+                const clearAll = () => {
+                    leftText.value = ''
+                    rightText.value = ''
+                    diff.value = { left: [], right: [], flow: [] }
+                }
+
+                return {
+                    leftText,
+                    rightText,
+                    diff,
+                    handleFileUpload,
+                    handleDrop,
+                    compareDocs,
+                    clearAll
+                }
+            }
+        }).mount('#app')
+    </script>
+</body>
+</html>
